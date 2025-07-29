@@ -326,15 +326,18 @@ def id_to_synset_name(id: str):
     offset = int(id[1:])
     return wn.synset_from_pos_and_offset("n", offset).name()
 
-def generate_images_illume(cls, imgs_per_attr, hierarchy_name, set_direction_attr, bs, ctx_images, q_images, model, n_ctx, base_seed, device, use_21k_ctx, use_21k_q, img_res: int =256):
+def generate_images_illume(cls, imgs_per_attr, hierarchy_name, set_direction_attr, bs, ctx_images, q_images, model, n_ctx, base_seed, device, use_21k_ctx, 
+                           use_21k_q, prompt_scheme, img_res: int =256):
 
     generated_images_per_q_cls = defaultdict(list)
+    query_images_per_q_cls = defaultdict(list)
     direct_subclasses_qt = direct_subclasses[hierarchy_name][set_direction_attr]
     num_iters = math.ceil(imgs_per_attr // bs)
     queries_per_iter = bs
     print(f"num_iters is {num_iters} ; queries_per_iter is {queries_per_iter} ; bs is {bs}", flush=True)
 
-    prompt_und = 'What is a common feature between these four images? Answer concisely in a few words.'
+    # prompt_und = 'What is a common feature between these four images? Answer concisely in a few words.'
+    prompt_und = prompt_scheme['understanding']
 
     inference_config_understanding = model.prepare_inference_config(
                                 temperature=1.0,
@@ -397,7 +400,8 @@ def generate_images_illume(cls, imgs_per_attr, hierarchy_name, set_direction_att
             
             common_features = [outputs[i]['output_text'] for i in range(len(outputs))]
             print(f"common features: {common_features}", flush=True)
-            instructions = [f'Take the common feature from the query image and generate a new image with it. The feature you inferred as common is: {comm_feat}.' for comm_feat in common_features]
+            instructions = [prompt_scheme['generation'].replace("<answer_1>", comm_feat) for comm_feat in common_features]
+            # instructions = [f'Take the common feature from the query image and generate a new image with it. The feature you inferred as common is: {comm_feat}.' for comm_feat in common_features]
             print(f"{instructions=}", flush=True)
 
             prompts = [model.default_editing_template.format(resolution_tag='', content=instruction) for instruction in instructions]
@@ -431,7 +435,9 @@ def generate_images_illume(cls, imgs_per_attr, hierarchy_name, set_direction_att
             
             generated_images_per_q_cls[qt_leaf_classes[n_q]].append(sample_n_q_tensor)
 
-    return generated_images_per_q_cls
+            query_images_per_q_cls[qt_leaf_classes[n_q]].append(rearrange((query_list[n_q].float() + 1) / 2, "c h w -> h w c"))  # Store the original query image
+
+    return generated_images_per_q_cls, query_images_per_q_cls
 
 def generate_images_vis_prompt(cls, imgs_per_attr, hierarchy_name, set_direction_attr, bs, ctx_images, q_images, model, n_ctx, base_seed, device, use_21k_ctx, use_21k_q):
     generated_images_per_q_cls = defaultdict(list)
@@ -585,13 +591,14 @@ def get_classifications(generated_images_per_q_cls, classifier, bs):
     return predicted_cls_count_per_q_cls
 
 def process_attr(cls, model, ctx_images, q_images, hierarchy_name, bs: int, classifier, device, out_path: str, model_type: str, imgs_per_attr: int = 100, n_ctx=5, 
-                 base_seed=123, use_21k_ctx: bool = False, use_21k_q: bool = False, do_classification: bool = True, pregenerated_imgs: bool = False):
+                 base_seed=123, use_21k_ctx: bool = False, use_21k_q: bool = False, do_classification: bool = True, pregenerated_imgs: bool = False, prompt_scheme = None):
     if use_21k_q:
         next_super = next((k for k, v in imgnet_21k_class_dict.items() if cls in v))
         super_classes = superclasses_21k[next_super] + [next_super] 
     else:
         super_classes = super_class_dir[hierarchy_name][cls]
     generated_images_set_dir_q_cls = defaultdict()
+    query_images_set_dir_q_cls = defaultdict()
 
     print(f" ==== PROCESSING CLASS {cls} ========")
 
@@ -605,25 +612,27 @@ def process_attr(cls, model, ctx_images, q_images, hierarchy_name, bs: int, clas
 
             # Generate 100 images per set direction and class
             if model_type == "set_learner":
-                generated_images_per_q_cls = generate_images(cls=cls, imgs_per_attr=imgs_per_attr, hierarchy_name=hierarchy_name, 
+                generated_images_per_q_cls, query_images_per_q_cls = generate_images(cls=cls, imgs_per_attr=imgs_per_attr, hierarchy_name=hierarchy_name, 
                                 set_direction_attr=set_direction_attr, bs=bs, ctx_images=ctx_images, q_images=q_images, model=model, n_ctx=n_ctx, base_seed=base_seed, 
                                 device=device, use_21k_ctx=use_21k_ctx, use_21k_q=use_21k_q)
             
             elif model_type == "vis_prompt":
-                generated_images_per_q_cls = generate_images_vis_prompt(cls=cls, imgs_per_attr=imgs_per_attr, hierarchy_name=hierarchy_name, 
+                generated_images_per_q_cls, query_images_per_q_cls = generate_images_vis_prompt(cls=cls, imgs_per_attr=imgs_per_attr, hierarchy_name=hierarchy_name, 
                                 set_direction_attr=set_direction_attr, bs=bs, ctx_images=ctx_images, q_images=q_images, model=model, n_ctx=n_ctx, base_seed=base_seed, 
                                 device=device, use_21k_ctx=use_21k_ctx, use_21k_q=use_21k_q)
 
             elif model_type == "illume":
-                generated_images_per_q_cls = generate_images_illume(cls=cls, imgs_per_attr=imgs_per_attr, hierarchy_name=hierarchy_name, 
+                generated_images_per_q_cls, query_images_per_q_cls = generate_images_illume(cls=cls, imgs_per_attr=imgs_per_attr, hierarchy_name=hierarchy_name, 
                                 set_direction_attr=set_direction_attr, bs=bs, ctx_images=ctx_images, q_images=q_images, model=model, n_ctx=n_ctx, base_seed=base_seed, 
-                                device=device, use_21k_ctx=use_21k_ctx, use_21k_q=use_21k_q)
+                                device=device, use_21k_ctx=use_21k_ctx, use_21k_q=use_21k_q, prompt_scheme=prompt_scheme)
             
             generated_images_set_dir_q_cls[set_direction_attr] = generated_images_per_q_cls
+            query_images_set_dir_q_cls[set_direction_attr] = query_images_per_q_cls
 
         print(f"Finished generating images for class {cls}", flush=True)
 
         torch.save(generated_images_set_dir_q_cls, os.path.join(out_path, f"{cls}_gen_imgs_per_dir_per_q.pth"))
+        torch.save(query_images_set_dir_q_cls, os.path.join(out_path, f"{cls}_query_imgs_per_dir_per_q.pth"))
         print("Saved generated images successfully!", flush=True)  
     else:
         print(f"Loading pregenerated images for class {cls}", flush=True)
@@ -739,6 +748,7 @@ def main():
     parser.add_argument('--bs', type=int, default=100, help="batch size")
     parser.add_argument('--no_classification', action='store_false', dest='do_classification')
     parser.add_argument('--pregenerated_imgs', action='store_true', help="Whether to use pregenerated images")
+    parser.add_argument('--prompt_scheme_idx', type=int, default=0, help="Which prompt scheme to use for ILLUME model")
     args = parser.parse_args()
 
     print("Arguments:")
@@ -763,16 +773,26 @@ def main():
     # animal_classes_rank = ['hognose_snake.n.01']
     print(f"On rank {rank}, got class list {animal_classes_rank}")
 
+    prompt_schemes = [{'understanding': 'What is a common feature between these four images? Answer concisely in a few words.',
+                   'generation': 'Take the common feature from the query image and generate a new image with it. The feature you inferred as common is: <answer_1>'},
+                  {'understanding': 'These four images have something common. What is it? Answer concisely in a few words.',
+                   'generation': 'This image contains an instance of a relevant attribute that you previously described as: <answer_1> Please generate a new image that only includes the relevant attribute, no other aspect from the given image.'},
+                  {'understanding': 'Which attribute is shared among these images? Answer concisely in a few words.',
+                   'generation': 'Please reproduce the relevant attribute from the query image, all other features can be removed/changed. The relevant attribute is <answer_1>'}]
+
     # Instantiate model
     if args.model_type in ["set_learner", "vis_prompt"]:
         model, cfg = load_model_from_config_inference(args.model_path, device=accelerator.device)
         model.eval()
         model.c_dropout = 0.0 
         model.cfg_scale = 4.0 
+        prompt_scheme = None
 
     elif args.model_type == "illume":
         print(f"Using ILLUME model", flush=True)
         model = load_illume_model(device=accelerator.device)
+        print(f"Using prompt scheme {args.prompt_scheme_idx}!", flush=True)
+        prompt_scheme = prompt_schemes[args.prompt_scheme_idx]
 
     if args.model_type == 'set_learner':
         model.direction_in_proj.to(torch.float32)
@@ -800,19 +820,6 @@ def main():
 
     if args.ctx_imgs == "ImageNet" or args.q_imgs == "ImageNet":
         print("Loading ImgNet into memory ...")
-        # imgnet_path = os.path.join(args.data_path, "imagenet_val_{000000..000006}.tar")
-        # Load ImageNet val split into memory
-        # ds = wds.WebDataset(imgnet_path, 
-        #                     nodesplitter=None).decode('torch').map_dict(jpg = T.Compose([
-        #         T.Resize(256),
-        #         T.CenterCrop(256),
-        #         T.Lambda(lambda x: x * 2 - 1),
-        #         T.Lambda(lambda x: x.bfloat16()),
-        #     ]
-        #     ),).batched(32)
-
-        # imgnet_dl = DataLoader(ds, num_workers=7, batch_size=None)
-
         imgnet_path = sorted(glob.glob(os.path.join(args.data_path, "imagenet_val_*.tar")))
 
         ds = wds.WebDataset(imgnet_path, 
@@ -892,7 +899,8 @@ def main():
                      q_images=q_images, hierarchy_name=hierarchy_name, bs=bs, 
                      imgs_per_attr=100, n_ctx=5, base_seed=123, device=accelerator.device, 
                      out_path=args.out_path, model_type=args.model_type, use_21k_ctx=use_21k_ctx, 
-                     use_21k_q=use_21k_q, do_classification=args.do_classification, pregenerated_imgs=args.pregenerated_imgs)
+                     use_21k_q=use_21k_q, do_classification=args.do_classification, pregenerated_imgs=args.pregenerated_imgs,
+                     prompt_scheme=prompt_scheme)
 
 
 if __name__ == "__main__":
